@@ -7,6 +7,8 @@ files in a cache folder (``ARCHAI_JEV_TEST_CACHE``) and is skipped otherwise.
 from __future__ import annotations
 
 import inspect
+import json
+import math
 import os
 from pathlib import Path
 
@@ -143,6 +145,7 @@ def test_the_default_model_answers_its_tasks_and_refuses_the_rest() -> None:
     answers = jev.ask("What is the capital of Australia?", {"s": SAFETY})
     safe = answers.choices["s"]
     assert safe.value == "SAFE" and safe.calibrated
+    assert safe.probabilities["SAFE"] >= 0.99  # the README example says "0.99..."
     assert sum(safe.probabilities.values()) == pytest.approx(1.0)
 
     entails = YesNo(
@@ -196,3 +199,63 @@ def test_the_default_model_is_shareable_between_threads_and_ask_many_keeps_order
         )
     for a, b in zip(threaded, one_by_one, strict=True):
         assert a == pytest.approx(b, abs=1e-6)
+
+
+GOLDEN = Path(__file__).parent / "data" / "default-golden" / "golden.jsonl"
+DECLARED_TEMPERATURE = 2.09
+Q8_0_TOLERANCE = 0.2  # spec 006c: the tolerance of the published Q8_0 file
+ARGMAX_GAP = 0.25
+
+
+def _oracle_probabilities(logits: list[float]) -> list[float]:
+    """The PyTorch oracle's softmax at the declared temperature, over the asked letters only."""
+    scaled = [z / DECLARED_TEMPERATURE for z in logits]
+    top = max(scaled)
+    exps = [math.exp(z - top) for z in scaled]
+    return [e / sum(exps) for e in exps]
+
+
+@pytest.mark.skipif(
+    not os.environ.get("ARCHAI_JEV_TEST_CACHE"),
+    reason="set ARCHAI_JEV_TEST_CACHE to a cache folder that holds the default model",
+)
+def test_the_default_model_agrees_with_the_oracle_on_every_task() -> None:
+    jev = Jev.from_pretrained(
+        offline=True, cache_dir=os.environ["ARCHAI_JEV_TEST_CACHE"]
+    )
+    notice = jev.model_info.notice
+    assert notice and "Demo model" in notice
+    assert jev.model_info.tasks == ("safety", "intent", "entailment", "similarity")
+
+    rows = [json.loads(line) for line in GOLDEN.read_text("utf-8").splitlines()]
+    assert len(rows) == 48
+    worst: dict[str, float] = {}
+    for row in rows:
+        spec = row["request"]["questions"]["q"]
+        criteria = spec["criteria"]
+        question: Choice | YesNo
+        if spec["type"] == "choice":
+            described = any(v is not None for v in criteria.values())
+            question = Choice(
+                spec["instructions"], criteria if described else list(criteria)
+            )
+        else:
+            question = YesNo(spec["instructions"], criteria)
+        answers = jev.ask(row["request"]["state"], {"q": question})
+        want = _oracle_probabilities(row["oracle_logits"])
+        if spec["type"] == "choice":
+            got = list(answers.choices["q"].probabilities.values())
+        else:
+            # The oracle's letters are [FALSE, TRUE]: [no, yes], as the library's YesNo.
+            got = [
+                1.0 - answers.yes_nos["q"].probability,
+                answers.yes_nos["q"].probability,
+            ]
+        delta = max(abs(g - w) for g, w in zip(got, want, strict=True))
+        worst[row["task"]] = max(worst.get(row["task"], 0.0), delta)
+        assert delta <= Q8_0_TOLERANCE, f"{row['id']}: |dp| = {delta:.3f}"
+        # The winner is the oracle's unless its top two are closer than 0.25 (spec 006c, Q8_0).
+        ranked = sorted(want, reverse=True)
+        if ranked[0] - ranked[1] >= ARGMAX_GAP:
+            assert got.index(max(got)) == want.index(ranked[0]), f"{row['id']}: argmax"
+    print("max |dp| per task:", {k: round(v, 4) for k, v in worst.items()})

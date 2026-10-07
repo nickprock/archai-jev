@@ -169,20 +169,7 @@ impl LlamaSession<'_> {
                     let i =
                         i32::try_from(*position).map_err(|_| inference("position too large"))?;
                     let row = self.ctx.get_logits_ith(i);
-                    if let Some(bad) = first_non_finite(row) {
-                        return Err(Error::NonFiniteHidden {
-                            question: String::new(),
-                            position: *position,
-                            value: f64::from(bad),
-                        });
-                    }
-                    let mut picked = Vec::with_capacity(ids.len());
-                    for &id in ids {
-                        let v = row.get(id as usize).copied().ok_or_else(|| {
-                            inference(format!("token id {id} is outside the vocabulary"))
-                        })?;
-                        picked.push(v);
-                    }
+                    let picked = super::pick_logits(row, ids, *position)?;
                     out.push(Output::Logits(picked));
                 }
                 #[allow(unreachable_patterns)]

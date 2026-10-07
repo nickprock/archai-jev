@@ -262,11 +262,104 @@ pub fn all_files(m: &Manifest) -> Vec<&FileEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::manifest::HeadSpec;
+    use crate::prompt::tasks;
 
     #[test]
     fn the_builtin_registry_passes_its_lint() {
         let reg = Registry::builtin().unwrap();
         reg.lint().unwrap();
+    }
+
+    #[test]
+    fn the_default_entry_declares_what_the_demo_model_is() {
+        let reg = Registry::builtin().unwrap();
+        let m = reg.default_entry().unwrap();
+        assert_eq!(m.name, "nickprock/archai-jev-qwen-1.5b");
+        assert_eq!(m.family, "qwen2-letters");
+        assert_eq!(
+            (m.template.id.as_str(), m.template.version),
+            ("chatml-letters", 1)
+        );
+        assert_eq!(m.max_context, 512);
+
+        // The head: ids, not strings (005 section 6.4), and the restricted softmax.
+        let HeadSpec::Letters {
+            rule,
+            choice_targets,
+            yes_no,
+        } = &m.head
+        else {
+            panic!("the default has a letters head")
+        };
+        assert_eq!(rule, "restricted_softmax");
+        let ids: Vec<(&str, u32)> = choice_targets
+            .iter()
+            .map(|t| (t.label.as_str(), t.id))
+            .collect();
+        assert_eq!(ids, [("A", 32), ("B", 33), ("C", 34), ("D", 35)]);
+        let (no, yes) = yes_no.as_ref().unwrap();
+        assert_eq!(
+            ((no.label.as_str(), no.id), (yes.label.as_str(), yes.id)),
+            (("FALSE", 30_351), ("TRUE", 20_611))
+        );
+
+        // The four tasks, read by the strict reader of the template.
+        let tasks = m.tasks.as_ref().unwrap();
+        let ids: Vec<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["safety", "intent", "entailment", "similarity"]);
+        let specs = tasks::parse(tasks, choice_targets.len()).unwrap();
+
+        // The declared calibration says which rule and which data it comes from.
+        assert_eq!(m.variants.len(), 1);
+        let variant = &m.variants[0];
+        assert_eq!(variant.dtype, "q8_0");
+        assert!(variant.calibration.declared);
+        assert_eq!(variant.calibration.temperature, Some(2.09));
+        let evidence = variant.calibration.evidence.as_deref().unwrap();
+        for phrase in [
+            "restricted softmax",
+            "first K answer letters",
+            "validation split",
+            "n=1447",
+            "0.058 -> 0.013",
+            "In-distribution only",
+        ] {
+            assert!(
+                evidence.contains(phrase),
+                "evidence lacks {phrase:?}: {evidence}"
+            );
+        }
+
+        // The notice says what the model is and what it is not.
+        let notice = m.notice.as_deref().unwrap();
+        for phrase in [
+            "Demo model",
+            "four fixed tasks",
+            "same distribution as its training data",
+            "overconfident",
+            "31 of the 77",
+            "not a general intent classifier",
+            "Not suitable for general-purpose use",
+        ] {
+            assert!(notice.contains(phrase), "notice lacks {phrase:?}: {notice}");
+        }
+
+        // Self-check vectors: every task has at least one (a vector is the task its question is).
+        let mut covered: Vec<String> = Vec::new();
+        for v in &variant.vectors {
+            let (state, questions) = crate::request::request_to_domain(&v.request).unwrap();
+            for (name, question) in questions.iter() {
+                let task = tasks::find(&specs, &m.name, name, question, &state).unwrap();
+                covered.push(task.id.clone());
+            }
+        }
+        for id in ids {
+            assert!(
+                covered.iter().any(|c| c == id),
+                "no self-check vector for {id}"
+            );
+        }
     }
 
     #[test]

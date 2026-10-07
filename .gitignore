@@ -89,3 +89,6 @@ CLAUDE.local.md
 *.onnx
 *.pt
 /models/
+
+# Local benchmark results (not versioned)
+/benches/

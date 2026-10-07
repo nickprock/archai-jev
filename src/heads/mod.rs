@@ -6,6 +6,8 @@
 //! model was loaded with, in one place.
 
 pub mod letters;
+#[cfg(test)]
+mod letters_tests;
 pub mod pointer;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_head;
