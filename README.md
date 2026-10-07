@@ -147,6 +147,46 @@ Environment variables: `ARCHAI_JEV_CACHE`, `ARCHAI_JEV_OFFLINE` / `HF_HUB_OFFLIN
 - **No performance claims are made.** Speed and memory were measured on a single machine during
   development and will be published once they are reproduced on a second one.
 
+## Demos
+
+Runnable, heavily commented scripts live in [`demos/`](demos/). They need a clone of the
+repository (they are not part of the wheel) and the default model.
+
+### `000_truth_invaders.py`: a retro arcade game played by the model
+
+![Truth Invaders](https://github.com/ArchAI-Labs/archai-jev/blob/main/docs/assets/truth-invaders.gif?raw=true)
+
+A fact appears at the top of the screen (the *state*) and claims fall like space invaders. For
+each claim the model answers one `YesNo` question of the `entailment` task: if it says *true*, the
+invader lands; if it says *false*, the cannon shoots it. Wrong calls and slow decisions cost base
+blocks, and the waves speed up, so the game shows how many decisions per second the model takes. The
+HUD shows the measured latency, decisions per second and accuracy live on your machine.
+
+```bash
+python demos/000_truth_invaders.py                # play (SPACE starts, ESC quits)
+python demos/000_truth_invaders.py --headless     # no window: accuracy and latency on all claims
+```
+
+It uses only the standard library (`tkinter`) and `archai_jev`. Like every use of the default
+model it is a demo: the model can be wrong, and the game says so on its game over screen.
+
+### `001` to `007`: one concept per script
+
+Each script is a terminal program with the library calls explained line by line. They use only
+the standard library and `archai_jev`, and print what they measure on your machine.
+
+| Script | What it shows |
+|---|---|
+| `001_quickstart_four_tasks.py` | the four tasks, typed answers (`value`, `probabilities`, `confidence`), several questions in one `ask` |
+| `002_grounding_check.py` | `entailment` as a fact checker: is each sentence of an answer supported by its source? |
+| `003_duplicate_finder.py` | `similarity` to group duplicate tickets, and why comparing every pair is expensive |
+| `004_never_wrong_probabilities.py` | every error the library raises on purpose, and how to catch it |
+| `005_calibration_lab.py` | what `temperature=` does to probabilities (and that it never changes the decision) |
+| `006_async_stream.py` | `ask_many`, `aask_many` and `asyncio`: the event loop stays free while the model decides |
+| `007_test_without_the_model.py` | `MockScorer` and `Fault`: test your own code without downloading the model |
+
+`004` (first two parts) and `007` run without the model; the others download it on the first run.
+
 ## Licenses
 
 archai-jev is licensed under the **Apache License 2.0**. It bundles llama.cpp (MIT) through the

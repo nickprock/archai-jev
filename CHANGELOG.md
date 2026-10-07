@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `demos/`: runnable, heavily commented scripts that need only the standard library and
+  `archai_jev` (they are not part of the wheel). `000_truth_invaders.py` is a retro arcade game
+  played by the model; `001` to `007` teach one concept each: the four tasks and typed answers,
+  a grounding check, a duplicate finder, every error the library raises on purpose, calibration
+  and `temperature=`, async (`aask_many`), and testing your own code with `MockScorer`.
+
 ## [0.1.0] - 2026-10-06
 
 ### Added
