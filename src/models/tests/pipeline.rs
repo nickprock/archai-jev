@@ -13,7 +13,7 @@ use crate::models::registry::Registry;
 use crate::models::resolve::{NameOrPath, Selection};
 use crate::models::testing::builder::{Builder, COMMIT};
 use crate::models::testing::fake::Perturb;
-use crate::models::testing::jsonedit::{n, obj, s};
+use crate::models::testing::jsonedit::{obj, s};
 use crate::models::testing::{FakeBackend, FakeConverter};
 
 fn registry_for(fixture_text: &str) -> Registry {
@@ -450,12 +450,7 @@ fn an_unknown_name_makes_no_request() {
 fn converted_fixture() -> (crate::models::testing::Fixture, Vec<u8>) {
     let good = Builder::tiny().build();
     let bytes = std::fs::read(good.gguf_path()).unwrap();
-    let f = Builder::tiny()
-        .set(
-            "variants.0.source",
-            obj(vec![("kind", s("hf-lora")), ("note", n(1))]),
-        )
-        .build();
+    let f = Builder::tiny().hf_lora().build();
     (f, bytes)
 }
 
@@ -470,8 +465,8 @@ fn converter_output_is_validated_like_a_downloaded_gguf() {
     assert_eq!(h.backend.runs(), 1);
     assert_eq!(
         h.records(),
-        0,
-        "converted models are always re-checked, no record"
+        1,
+        "a converted model gets a verification record like a downloaded one"
     );
     // a faulty converter (a tensor is missing) cannot get around the checks
     let faulty = Builder::tiny().drop_tensor("blk.0.attn_q.weight").build();

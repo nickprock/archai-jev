@@ -56,6 +56,7 @@ pub struct Builder {
     context_length: u32,
     max_context: u64,
     declared: Option<f64>,
+    lora: bool,
     tensor_edits: Vec<Box<dyn Fn(&mut Vec<TensorDesc>)>>,
     meta_edits: Vec<Box<dyn Fn(&mut Vec<(String, Meta)>)>>,
     gguf_edits: Vec<Box<dyn Fn(&mut Vec<u8>)>>,
@@ -90,6 +91,7 @@ impl Builder {
             context_length: 2048,
             max_context: 512,
             declared: None,
+            lora: false,
             tensor_edits: Vec::new(),
             meta_edits: Vec::new(),
             gguf_edits: Vec::new(),
@@ -123,6 +125,17 @@ impl Builder {
     /// Make the manifest a registry one: files get an `origin`, revision is a commit hash.
     pub fn registry(mut self) -> Self {
         self.registry = true;
+        self
+    }
+    /// Make the variant's source an `hf-lora` one: six small files stand for the base model and
+    /// the adapter (the fake converter ignores their content; the loader still verifies them).
+    pub fn hf_lora(mut self) -> Self {
+        self.lora = true;
+        self
+    }
+    /// The number of rows of the vocabulary (and of the ids the fake engine builds).
+    pub fn vocab(mut self, n: u64) -> Self {
+        self.n_vocab = n;
         self
     }
     pub fn declared(mut self, temperature: f64) -> Self {
@@ -377,6 +390,57 @@ impl Builder {
         obj(pairs)
     }
 
+    /// The files of an `hf-lora` source: `(role, path, content)`.
+    fn lora_files() -> [(&'static str, &'static str, &'static [u8]); 6] {
+        [
+            ("config", "base/config.json", b"{\"base\": \"config\"}"),
+            ("weights", "base/model.safetensors", b"base weights"),
+            (
+                "tokenizer",
+                "base/tokenizer.json",
+                b"{\"base\": \"tokenizer\"}",
+            ),
+            (
+                "tokenizer_config",
+                "base/tokenizer_config.json",
+                b"{\"base\": \"tokenizer_config\"}",
+            ),
+            (
+                "adapter_config",
+                "adapter/adapter_config.json",
+                b"{\"adapter\": 1}",
+            ),
+            (
+                "adapter_weights",
+                "adapter/adapter_model.safetensors",
+                b"adapter weights",
+            ),
+        ]
+    }
+
+    fn lora_source_json(&self) -> Json {
+        let f = Self::lora_files();
+        let entry = |i: usize| self.file_entry(f[i].1, f[i].2);
+        obj(vec![
+            ("kind", s("hf-lora")),
+            (
+                "base",
+                obj(vec![
+                    ("repo", s("test/tiny")),
+                    ("revision", s(COMMIT)),
+                    ("config", entry(0)),
+                    ("weights", arr(vec![entry(1)])),
+                    ("tokenizer", entry(2)),
+                    ("tokenizer_config", entry(3)),
+                ]),
+            ),
+            (
+                "adapter",
+                obj(vec![("config", entry(4)), ("weights", entry(5))]),
+            ),
+        ])
+    }
+
     /// The self-check request used by every fixture.
     pub fn request(&self) -> Json {
         let mut questions = vec![
@@ -419,7 +483,7 @@ impl Builder {
         ])
     }
 
-    fn vector(&self, temperature: f64) -> Json {
+    pub fn vector(&self, temperature: f64) -> Json {
         let request = self.request();
         let ids: Vec<Json> = fake_ids(&request, self.n_vocab)
             .into_iter()
@@ -458,6 +522,13 @@ impl Builder {
         let tok_bytes = tok_json.to_canonical_string().into_bytes();
         std::fs::write(dir.path().join("model.gguf"), &gguf).unwrap();
         std::fs::write(dir.path().join("tokenizer.json"), &tok_bytes).unwrap();
+        if self.lora {
+            for (_, path, content) in Self::lora_files() {
+                let full = dir.path().join(path);
+                std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+                std::fs::write(full, content).unwrap();
+            }
+        }
         let head_bytes = vec![0u8; 64];
         if family.head_kind == "pointer" {
             std::fs::write(dir.path().join("head.bin"), &head_bytes).unwrap();
@@ -528,10 +599,14 @@ impl Builder {
                     ("dtype", s(&self.dtype)),
                     (
                         "source",
-                        obj(vec![
-                            ("kind", s("gguf")),
-                            ("file", self.file_entry("model.gguf", &gguf)),
-                        ]),
+                        if self.lora {
+                            self.lora_source_json()
+                        } else {
+                            obj(vec![
+                                ("kind", s("gguf")),
+                                ("file", self.file_entry("model.gguf", &gguf)),
+                            ])
+                        },
                     ),
                     ("calibration", calibration),
                     (

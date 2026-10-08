@@ -8,11 +8,13 @@ use std::sync::Arc;
 
 use super::backend::{Backend, Engine, ValidatedCheckpoint};
 use super::families;
+use super::head::HeadReader;
 use super::incompat::Incompat;
 use super::manifest::HeadSpec;
+use crate::convert::headpt::HeadPtReader;
 use crate::engine::llama::{LlamaConfig, LlamaForward};
 use crate::error::{Error, Result};
-use crate::heads::{Head, LettersHead};
+use crate::heads::{Head, LettersHead, PointerHead};
 use crate::model_scorer::ModelScorer;
 use crate::prompt::template::instantiate;
 use crate::prompt::{PromptTokenizer, Roles};
@@ -66,10 +68,20 @@ impl Backend for LlamaBackend {
                 false,
                 choice_targets.len(),
             ),
-            HeadSpec::Pointer { .. } => {
-                return Err(Error::IncompatibleModel(Incompat::HeadWeights {
-                    detail: "pointer heads need the reader of head weight files, which this build does not have yet (it arrives with the checkpoint converter)".to_string(),
-                }));
+            HeadSpec::Pointer {
+                d_model, proj_dim, ..
+            } => {
+                let path = checkpoint.head_path.as_ref().ok_or_else(|| {
+                    Error::IncompatibleModel(Incompat::HeadWeights {
+                        detail: "a pointer head needs its weights file".to_string(),
+                    })
+                })?;
+                let tensors = HeadPtReader.read(path).map_err(Error::IncompatibleModel)?;
+                (
+                    Box::new(PointerHead::from_tensors(&tensors, *d_model, *proj_dim)?),
+                    true,
+                    255,
+                )
             }
         };
         let template = instantiate(

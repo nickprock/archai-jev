@@ -12,9 +12,10 @@ use super::validate;
 use crate::json_strict::{self, Json, Obj};
 
 /// Manifests of the built-in models (one file per entry, included at compile time).
-const BUILTIN_MANIFESTS: &[&str] = &[include_str!(
-    "registry/nickprock__archai-jev-qwen-1.5b.json"
-)];
+const BUILTIN_MANIFESTS: &[&str] = &[
+    include_str!("registry/nickprock__archai-jev-qwen-1.5b.json"),
+    include_str!("registry/jaredpalmer__kev-0.8b.json"),
+];
 /// Which entry is the default and which revision of each name is current.
 const BUILTIN_INDEX: &str = include_str!("registry/index.json");
 
@@ -196,7 +197,8 @@ impl Registry {
             {
                 return Err(format!("{tag} appears twice"));
             }
-            validate::semantics(m, &[]).map_err(|e| format!("{tag}: {e}"))?;
+            // a registry entry is judged by what it declares, not by what this build can convert
+            validate::semantics(m, &["hf-lora".to_string()]).map_err(|e| format!("{tag}: {e}"))?;
             for file in all_files(m) {
                 if file.origin.is_none() {
                     return Err(format!("{tag}: file {} has no origin", file.path));
@@ -252,8 +254,10 @@ pub fn all_files(m: &Manifest) -> Vec<&FileEntry> {
         out.push(weights);
     }
     for v in &m.variants {
-        if let Source::Gguf { file } = &v.source {
-            out.push(file);
+        match &v.source {
+            Source::Gguf { file } => out.push(file),
+            Source::HfLora(source) => out.extend(source.files()),
+            Source::Reserved { .. } => {}
         }
     }
     out
@@ -360,6 +364,98 @@ mod tests {
                 "no self-check vector for {id}"
             );
         }
+    }
+
+    #[test]
+    fn kev_0_8b_pins_its_eight_files_and_declares_both_variants() {
+        let reg = Registry::builtin().unwrap();
+        let m = reg
+            .resolve("jaredpalmer/kev-0.8b", None)
+            .expect("the entry exists");
+        assert_eq!(m.revision, "9a45d25eb2ab761841196625383fa1dff0e56c1e");
+        assert_eq!(m.family, "qwen35-pointer");
+        assert_eq!((m.template.id.as_str(), m.template.version), ("kev", 1));
+        assert_eq!((m.max_context, m.trained_context), (8205, Some(7552)));
+        assert_eq!(m.license.spdx, "Apache-2.0");
+        assert!(!reg.is_default(m), "the demo model stays the default");
+        let HeadSpec::Pointer {
+            d_model, proj_dim, ..
+        } = &m.head
+        else {
+            panic!("a pointer head")
+        };
+        assert_eq!((*d_model, *proj_dim), (1024, 256));
+        // the files: path, size and SHA-256 of spec 018 section 5
+        let mut files: Vec<(&str, u64, &str)> = all_files(m)
+            .into_iter()
+            .map(|f| (f.path.as_str(), f.size, f.sha256.as_str()))
+            .collect();
+        files.sort_unstable();
+        files.dedup();
+        let want = [
+            (
+                "adapter_config.json",
+                1273,
+                "748acb2cda88454cb1ba69d745ba336f3fcb5486eac349e90960c8b8d8d3e854",
+            ),
+            (
+                "adapter_model.safetensors",
+                43_338_624,
+                "9b908623acb162118575f4e7a94524f9c139c335be4bfb74d6cfceca01e1885a",
+            ),
+            (
+                "config.json",
+                2907,
+                "b90b86f35c8e6925ef74ee04d0e758f0a845c83a42089ad82bbaa948de9b4204",
+            ),
+            (
+                "head.pt",
+                2_103_999,
+                "f400bd12802b2b105ae45d6b03774a158a3db4fccff42413734ddca2e5c920b6",
+            ),
+            (
+                "model.safetensors-00001-of-00001.safetensors",
+                1_746_942_600,
+                "c2b1e5a17d9c1e27685d92ed9b382911ebb99955ecd89052d1721241adfbab6c",
+            ),
+            (
+                "tokenizer.json",
+                12_807_196,
+                "fe000e3ed39ed12b8d2481d527d44f93c65d37e87645d2dcc80d1bf9d50d2927",
+            ),
+            (
+                "tokenizer.json",
+                19_989_325,
+                "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523",
+            ),
+            (
+                "tokenizer_config.json",
+                16_712,
+                "e611fbccc7c29ef3b1cafb1cb7ea548d189968632901d678fd62be68c47885de",
+            ),
+        ];
+        assert_eq!(files, want);
+        // both variants, the default one in bf16, the same declared temperature, 8 vectors each
+        let dtypes: Vec<&str> = m.variants.iter().map(|v| v.dtype.as_str()).collect();
+        assert_eq!(
+            (dtypes.as_slice(), m.default_dtype.as_str()),
+            (["bf16", "f32"].as_slice(), "bf16")
+        );
+        for v in &m.variants {
+            assert!(v.calibration.declared);
+            assert_eq!(v.calibration.temperature, Some(2.351_095_812_567_217_4));
+            assert_eq!(v.vectors.len(), 8);
+        }
+        let bf16 = m
+            .variant("bf16")
+            .unwrap()
+            .calibration
+            .evidence
+            .clone()
+            .unwrap();
+        assert!(bf16.contains("not recomputed for bf16"), "{bf16}");
+        let list: Vec<String> = reg.names();
+        assert!(list.contains(&"jaredpalmer/kev-0.8b".to_string()));
     }
 
     #[test]

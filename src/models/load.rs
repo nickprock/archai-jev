@@ -6,13 +6,14 @@ use std::sync::Arc;
 
 use super::backend::{Backend, ValidatedCheckpoint};
 use super::calibration_gate::{self, CalibrationSource};
-use super::convert::{Converter, safe_component};
+use super::convert::{ConvertJob, Converter, SourceFiles};
 use super::files::FileEntry;
 use super::gguf;
 use super::hash::{sha256_file, sha256_hex};
 use super::head::{HeadReader, check_pointer};
 use super::incompat::Incompat;
 use super::manifest::{HeadSpec, Manifest, ManifestOrigin, Source, Variant};
+use super::materialize::{self, Materialized};
 use super::record::{self, Record, Stamp};
 use super::registry::Registry;
 use super::resolve::{Selection, Target, resolve};
@@ -104,10 +105,50 @@ fn incompat(i: Incompat) -> Error {
     Error::IncompatibleModel(i)
 }
 
+/// A converted model of this call: how it was made and what the cache recorded about it.
+struct Converted<'a> {
+    converter: &'a dyn Converter,
+    job: ConvertJob<'a>,
+    out: PathBuf,
+    done: Materialized,
+    /// Converted in this very call: its SHA-256 was computed while it was written, so it is
+    /// not read again to be compared with itself.
+    fresh: bool,
+}
+
+impl Converted<'_> {
+    /// The name of the GGUF in the verification record.
+    fn stamp_name(&self) -> String {
+        format!(
+            "converted:{}",
+            self.done
+                .model
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        )
+    }
+
+    /// Whether the GGUF in the cache still has the SHA-256 the conversion recorded.
+    fn matches_record(&self) -> Result<bool> {
+        if self.fresh {
+            return Ok(true);
+        }
+        let (sha, _) = sha256_file(&self.done.model).map_err(|_| {
+            incompat(Incompat::FileMissing {
+                path: self.done.model.display().to_string(),
+            })
+        })?;
+        Ok(sha == self.done.sha256)
+    }
+}
+
 fn files_of<'m>(m: &'m Manifest, v: &'m Variant) -> Vec<&'m FileEntry> {
     let mut out = Vec::new();
-    if let Source::Gguf { file } = &v.source {
-        out.push(file);
+    match &v.source {
+        Source::Gguf { file } => out.push(file),
+        Source::HfLora(source) => out.extend(source.files()),
+        Source::Reserved { .. } => {}
     }
     out.push(&m.tokenizer.file);
     if let HeadSpec::Pointer { weights, .. } = &m.head {
@@ -208,41 +249,6 @@ fn verify_integrity(files: &[Located<'_>]) -> Result<()> {
     Ok(())
 }
 
-/// Run the converter into the cache once per (manifest, dtype, converter version).
-fn materialize(
-    converter: &dyn Converter,
-    raw: &crate::json_strict::Json,
-    out: &std::path::Path,
-) -> Result<PathBuf> {
-    let marker = out.join("DONE");
-    if let Ok(done) = std::fs::read_to_string(&marker) {
-        return Ok(out.join(done.trim()));
-    }
-    let fail = |detail: String| incompat(Incompat::ConversionFailed { detail });
-    let parent = out
-        .parent()
-        .ok_or_else(|| fail("no cache folder".to_string()))?;
-    std::fs::create_dir_all(parent).map_err(|e| fail(e.to_string()))?;
-    let tmp = parent.join(format!(
-        "{}.tmp-{}",
-        out.file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).map_err(|e| fail(e.to_string()))?;
-    let converted = converter.convert(raw, &tmp).map_err(incompat)?;
-    let rel = converted.model.to_string_lossy().replace('\\', "/");
-    std::fs::write(tmp.join("DONE"), &rel).map_err(|e| fail(e.to_string()))?;
-    if std::fs::rename(&tmp, out).is_err() {
-        // another process finished first: use its result
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-    let done = std::fs::read_to_string(&marker).map_err(|e| fail(e.to_string()))?;
-    Ok(out.join(done.trim()))
-}
-
 /// Load a model: resolve, read and check the manifest, fetch and verify the files, check the
 /// structure, load the weights, self-check (first time only) and return the model.
 ///
@@ -307,26 +313,100 @@ pub fn load_model(req: &LoadRequest, ctx: &Context<'_>) -> Result<LoadedModel> {
         HeadSpec::Pointer { weights, .. } => by_entry(weights),
         HeadSpec::Letters { .. } => None,
     };
-    let (model_path, converted) = match &variant.source {
-        Source::Gguf { file } => (by_entry(file).unwrap_or_default(), false),
-        Source::Reserved { kind, raw } => {
-            let converter = ctx
-                .converter
-                .ok_or_else(|| incompat(Incompat::SourceWithoutConverter { kind: kind.clone() }))?;
-            let out = layout
-                .materialized
-                .join(manifest_sha.get(..16).unwrap_or(&manifest_sha))
-                .join(&dtype)
-                .join(safe_component(&converter.version()));
-            (materialize(converter, raw, &out)?, true)
+    // `originals_verified` says whether the SHA-256 of every original file was already checked
+    // in this call (it is done before a conversion starts, and not twice).
+    let mut originals_verified = false;
+    let mut converted_here: Option<Converted<'_>> = None;
+    let mut model_path = match &variant.source {
+        Source::Gguf { file } => by_entry(file).unwrap_or_default(),
+        Source::Reserved { kind, .. } => {
+            return Err(incompat(Incompat::SourceWithoutConverter {
+                kind: kind.clone(),
+            }));
+        }
+        Source::HfLora(source) => {
+            let converter = ctx.converter.ok_or_else(|| {
+                incompat(Incompat::SourceWithoutConverter {
+                    kind: "hf-lora".to_string(),
+                })
+            })?;
+            let version = converter.version();
+            let out = materialize::folder(&layout.materialized, &manifest_sha, &dtype, &version);
+            let path_of = |e: &FileEntry| by_entry(e).unwrap_or_default();
+            let job = ConvertJob {
+                manifest: &manifest,
+                dtype: &dtype,
+                params: &resolved.params,
+                source,
+                files: SourceFiles {
+                    base_config: path_of(&source.base.config),
+                    base_weights: path_of(&source.base.weights),
+                    base_tokenizer: path_of(&source.base.tokenizer),
+                    base_tokenizer_config: path_of(&source.base.tokenizer_config),
+                    adapter_config: path_of(&source.adapter.config),
+                    adapter_weights: path_of(&source.adapter.weights),
+                },
+                head_path: head_path.as_deref(),
+                destination: out.clone(),
+                observer: ctx.observer,
+                cancel: ctx.cancel,
+            };
+            let (done, fresh) = match materialize::read(&out, &version, &dtype) {
+                Some(m) => (m, false),
+                None => {
+                    // The originals are checked **before** anything is converted from them.
+                    verify_integrity(&located)?;
+                    originals_verified = true;
+                    materialize::build(converter, &job, &out)?
+                }
+            };
+            let path = done.model.clone();
+            converted_here = Some(Converted {
+                converter,
+                job,
+                out,
+                done,
+                fresh,
+            });
+            path
         }
     };
-    // A converted model has no hash in the manifest to vouch for, so it is always re-checked.
-    let vouched = !converted
-        && record::load(&layout.verified, &key).is_some_and(|r| record::matches(&r, &current));
+    // What the verification record covers: the originals and, for a converted model, the GGUF
+    // as the conversion recorded it.
+    let mut current = current;
+    if let Some(c) = &converted_here {
+        current.push((c.stamp_name(), c.done.model.clone(), c.done.sha256.clone()));
+    }
+    let vouched =
+        record::load(&layout.verified, &key).is_some_and(|r| record::matches(&r, &current));
 
     if !vouched {
-        verify_integrity(&located)?;
+        if !originals_verified {
+            verify_integrity(&located)?;
+        }
+        if let Some(c) = converted_here.as_mut() {
+            // The converted file must still be what the conversion wrote. If not (a damaged or
+            // altered cache), it is derived data: convert again from the verified originals,
+            // once; if that does not match either, something is wrong with the converter.
+            if !c.matches_record()? {
+                ctx.observer.on_event(&Event::Warning(
+                    "the converted model in the cache does not match its record; converting again"
+                        .to_string(),
+                ));
+                materialize::discard(&c.out);
+                (c.done, c.fresh) = materialize::build(c.converter, &c.job, &c.out)?;
+                if !c.matches_record()? {
+                    return Err(incompat(Incompat::ConversionFailed {
+                        detail: "the converted file does not match its record even after converting again"
+                            .to_string(),
+                    }));
+                }
+                model_path = c.done.model.clone();
+                if let Some(last) = current.last_mut() {
+                    *last = (c.stamp_name(), c.done.model.clone(), c.done.sha256.clone());
+                }
+            }
+        }
         // Stage 4: GGUF.
         let info = gguf::read_header(&model_path).map_err(incompat)?;
         validate::gguf_vs_manifest(&info, &resolved, &manifest, &dtype).map_err(incompat)?;
@@ -347,7 +427,11 @@ pub fn load_model(req: &LoadRequest, ctx: &Context<'_>) -> Result<LoadedModel> {
                 .declared
                 .then_some(variant.calibration.temperature)
                 .flatten();
-            check_pointer(&manifest.head, reader, path, declared).map_err(incompat)?;
+            let base = match &variant.source {
+                Source::HfLora(s) => Some((s.base.repo.as_str(), s.base.revision.as_str())),
+                _ => None,
+            };
+            check_pointer(&manifest.head, reader, path, declared, base).map_err(incompat)?;
         }
     }
 
@@ -377,20 +461,19 @@ pub fn load_model(req: &LoadRequest, ctx: &Context<'_>) -> Result<LoadedModel> {
             tol,
             decision.manifest_temperature,
         )?;
-        let stamps: Vec<Stamp> = located
+        let stamps: Vec<Stamp> = current
             .iter()
-            .filter_map(|f| {
-                let (size, mtime_ns) = record::stat(&f.path).ok()?;
+            .filter_map(|(name, path, sha256)| {
+                let (size, mtime_ns) = record::stat(path).ok()?;
                 Some(Stamp {
-                    name: f.entry.path.clone(),
+                    name: name.clone(),
                     size,
                     mtime_ns,
-                    sha256: f.entry.sha256.clone(),
+                    sha256: sha256.clone(),
                 })
             })
             .collect();
-        if !converted
-            && stamps.len() == located.len()
+        if stamps.len() == current.len()
             && record::save(&layout.verified, &Record { key, files: stamps }).is_err()
         {
             ctx.observer.on_event(&Event::Warning(

@@ -81,10 +81,16 @@ fn check_variant(
             dtype: v.dtype.clone(),
         });
     }
-    if let Source::Reserved { kind, .. } = &v.source
-        && !converter_kinds.contains(kind)
-    {
-        return Err(Incompat::SourceWithoutConverter { kind: kind.clone() });
+    match &v.source {
+        Source::Reserved { kind, .. } => {
+            return Err(Incompat::SourceWithoutConverter { kind: kind.clone() });
+        }
+        Source::HfLora(_) if !converter_kinds.iter().any(|k| k == "hf-lora") => {
+            return Err(Incompat::SourceWithoutConverter {
+                kind: "hf-lora".to_string(),
+            });
+        }
+        Source::HfLora(_) | Source::Gguf { .. } => {}
     }
     for kind in tasks_kinds(m, family) {
         if !v

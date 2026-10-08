@@ -349,11 +349,13 @@ fn reject_dtype_without_tolerance() {
 
 #[test]
 fn reject_source_without_converter() {
-    for kind in ["hf-lora", "hf-full"] {
-        let i = rejects(Builder::tiny().set("variants.0.source", obj(vec![("kind", s(kind))])));
-        assert!(matches!(i, Incompat::SourceWithoutConverter { .. }), "{i}");
-        has(&i, kind);
-    }
+    let i = rejects(Builder::tiny().hf_lora());
+    assert!(matches!(i, Incompat::SourceWithoutConverter { .. }), "{i}");
+    has(&i, "hf-lora");
+    // `hf-full` is reserved: refused even when a converter exists
+    let i = rejects(Builder::tiny().set("variants.0.source", obj(vec![("kind", s("hf-full"))])));
+    assert!(matches!(i, Incompat::SourceWithoutConverter { .. }), "{i}");
+    has(&i, "hf-full");
 }
 
 #[test]

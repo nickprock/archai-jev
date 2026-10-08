@@ -12,6 +12,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use super::classes::PyModel;
+use crate::convert::Qwen35Converter;
+use crate::convert::headpt::HeadPtReader;
 use crate::error::Error;
 use crate::hub::cache::{self, CacheEnv, Os};
 use crate::hub::config::HubConfig;
@@ -72,6 +74,24 @@ impl Observer for LoggingObserver {
                 Self::log("info", &format!("model {name}: license {spdx} ({url})"));
             }
             Event::Warning(text) => Self::log("warning", text),
+            Event::ConvertStart {
+                tensors,
+                bytes,
+                destination,
+                dtype,
+            } => Self::log(
+                "info",
+                &format!(
+                    "converting the original files to a {dtype} GGUF ({tensors} tensors, {bytes} bytes) into {destination}; this happens once"
+                ),
+            ),
+            Event::ConvertProgress { done, total } => {
+                Self::log("info", &format!("conversion: {done} of {total} tensors"));
+            }
+            Event::ConvertDone { seconds, bytes } => Self::log(
+                "info",
+                &format!("conversion done in {seconds:.1} s ({bytes} bytes)"),
+            ),
         }
     }
 }
@@ -176,8 +196,8 @@ pub fn load_model<'py>(
             transport: &transport,
             observer: &LoggingObserver,
             cancel: &SignalCancel,
-            head_reader: None,
-            converter: None,
+            head_reader: Some(&HeadPtReader),
+            converter: Some(&Qwen35Converter),
         };
         load::load_model(&request, &ctx)
     })?;

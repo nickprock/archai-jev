@@ -206,6 +206,24 @@ pub enum Incompat {
     ConversionFailed {
         detail: String,
     },
+    /// An original file of a checkpoint (safetensors, `config.json`, adapter, tokenizer files)
+    /// is not valid. `file` is the role or path, `detail` says what is wrong and where.
+    SourceFile {
+        file: String,
+        detail: String,
+    },
+    /// The checkpoint uses something the converter does not support (and so does not guess).
+    SourceUnsupported {
+        what: String,
+        detail: String,
+    },
+    /// A parameter of the manifest's `architecture` differs from the one in the files.
+    ArchParamMismatch {
+        param: String,
+        manifest: String,
+        file: String,
+        got: String,
+    },
 }
 
 fn list(items: &[String]) -> String {
@@ -447,6 +465,22 @@ impl fmt::Display for Incompat {
                 write!(f, "the decision head weights are not valid: {detail}")
             }
             I::ConversionFailed { detail } => write!(f, "checkpoint conversion failed: {detail}"),
+            I::SourceFile { file, detail } => {
+                write!(f, "the checkpoint file '{file}' is not valid: {detail}")
+            }
+            I::ArchParamMismatch {
+                param,
+                manifest,
+                file,
+                got,
+            } => write!(
+                f,
+                "architecture.{param} is {manifest} in the manifest but {got} in {file}; the manifest must describe the files it converts"
+            ),
+            I::SourceUnsupported { what, detail } => write!(
+                f,
+                "this checkpoint uses {what}, which is not supported yet: {detail}; the converter does not guess"
+            ),
         }
     }
 }

@@ -4,7 +4,7 @@
 //! fields, types, domains of values). What the declarations mean (family, tolerances,
 //! calibration, tasks) is checked in `validate` (stage 2).
 
-use super::files::{FileEntry, is_commit};
+use super::files::{FileEntry, is_commit, is_repo_id};
 use super::incompat::Incompat;
 use super::vectors::{Vector, parse_vectors};
 use crate::json_strict::{self, FieldProblem, Json, Obj};
@@ -112,6 +112,56 @@ pub struct Task {
     pub matching: Json,
 }
 
+/// The original files of the base model of an `hf-lora` source.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BaseFiles {
+    /// Repository the base model comes from, e.g. `Qwen/Qwen3.5-0.8B-Base`.
+    pub repo: String,
+    /// Full commit hash of that repository.
+    pub revision: String,
+    /// `config.json`.
+    pub config: FileEntry,
+    /// The weights, one `.safetensors` file (sharded checkpoints are not supported).
+    pub weights: FileEntry,
+    /// `tokenizer.json` (its vocabulary goes into the GGUF; the prompt uses the manifest's one).
+    pub tokenizer: FileEntry,
+    /// `tokenizer_config.json` (added tokens and special token names).
+    pub tokenizer_config: FileEntry,
+}
+
+/// The LoRA adapter of an `hf-lora` source.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdapterFiles {
+    /// `adapter_config.json`.
+    pub config: FileEntry,
+    /// `adapter_model.safetensors`.
+    pub weights: FileEntry,
+}
+
+/// A checkpoint made of a base model and a LoRA adapter, converted to GGUF by the library
+/// (spec 018).
+#[derive(Debug, Clone, PartialEq)]
+pub struct HfLoraSource {
+    /// The base model files.
+    pub base: BaseFiles,
+    /// The adapter files.
+    pub adapter: AdapterFiles,
+}
+
+impl HfLoraSource {
+    /// Every file of the source, in a fixed order.
+    pub fn files(&self) -> [&FileEntry; 6] {
+        [
+            &self.base.config,
+            &self.base.weights,
+            &self.base.tokenizer,
+            &self.base.tokenizer_config,
+            &self.adapter.config,
+            &self.adapter.weights,
+        ]
+    }
+}
+
 /// Where the weights of a variant come from.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Source {
@@ -120,9 +170,11 @@ pub enum Source {
         /// The GGUF.
         file: FileEntry,
     },
-    /// Reserved for the converter (018): kind and raw fields.
+    /// Original files converted into a GGUF at first use: a base model plus a LoRA adapter.
+    HfLora(Box<HfLoraSource>),
+    /// A kind that is reserved but not supported yet (`hf-full`): always refused.
     Reserved {
-        /// `hf-lora` or `hf-full`.
+        /// The kind.
         kind: String,
         /// The fields, unchecked.
         raw: Json,
@@ -330,7 +382,8 @@ fn parse_source(v: &Json, path: &str, registry: bool) -> Result<Source, Incompat
             s.finish()?;
             Ok(Source::Gguf { file })
         }
-        "hf-lora" | "hf-full" => Ok(Source::Reserved {
+        "hf-lora" => parse_hf_lora(s, registry),
+        "hf-full" => Ok(Source::Reserved {
             kind: kind.to_string(),
             raw: v.clone(),
         }),
@@ -339,6 +392,82 @@ fn parse_source(v: &Json, path: &str, registry: bool) -> Result<Source, Incompat
             format!("must be \"gguf\", \"hf-lora\" or \"hf-full\", got {other:?}"),
         )),
     }
+}
+
+fn parse_hf_lora(mut s: Obj<'_>, registry: bool) -> Result<Source, Incompat> {
+    let file = |o: &mut Obj<'_>, key: &str| -> Result<FileEntry, Incompat> {
+        FileEntry::from_json(o.req(key)?, &o.child_path(key), registry)
+    };
+    let mut b = s.obj("base")?;
+    let repo = b.str("repo")?.to_string();
+    if !is_repo_id(&repo) {
+        return Err(bad(
+            &b.child_path("repo"),
+            format!("is not a repository id: {repo:?}"),
+        ));
+    }
+    let revision = b.str("revision")?.to_string();
+    if !is_commit(&revision) {
+        return Err(bad(
+            &b.child_path("revision"),
+            format!("must be a full 40-digit commit hash, got {revision:?}"),
+        ));
+    }
+    let config = file(&mut b, "config")?;
+    let weights_path = b.child_path("weights");
+    let weights_list = b.arr("weights")?;
+    let [only] = weights_list else {
+        return Err(bad(
+            &weights_path,
+            format!(
+                "must list exactly one safetensors file, got {} (sharded checkpoints are not supported)",
+                weights_list.len()
+            ),
+        ));
+    };
+    let weights = FileEntry::from_json(only, &format!("{weights_path}[0]"), registry)?;
+    let tokenizer = file(&mut b, "tokenizer")?;
+    let tokenizer_config = file(&mut b, "tokenizer_config")?;
+    let base_path = b.path().to_string();
+    b.finish()?;
+    if registry {
+        for (name, f) in [
+            ("config", &config),
+            ("weights[0]", &weights),
+            ("tokenizer", &tokenizer),
+            ("tokenizer_config", &tokenizer_config),
+        ] {
+            if let Some(o) = &f.origin
+                && (o.repo != repo || o.revision != revision)
+            {
+                return Err(bad(
+                    &format!("{base_path}.{name}.origin"),
+                    format!(
+                        "is {}@{}, but base.repo and base.revision say {repo}@{revision}",
+                        o.repo, o.revision
+                    ),
+                ));
+            }
+        }
+    }
+    let mut a = s.obj("adapter")?;
+    let adapter = AdapterFiles {
+        config: file(&mut a, "config")?,
+        weights: file(&mut a, "weights")?,
+    };
+    a.finish()?;
+    s.finish()?;
+    Ok(Source::HfLora(Box::new(HfLoraSource {
+        base: BaseFiles {
+            repo,
+            revision,
+            config,
+            weights,
+            tokenizer,
+            tokenizer_config,
+        },
+        adapter,
+    })))
 }
 
 fn parse_calibration(v: &Json, path: &str) -> Result<CalibrationDecl, Incompat> {

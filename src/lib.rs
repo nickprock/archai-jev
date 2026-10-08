@@ -16,6 +16,7 @@
 pub mod answers;
 pub mod ask;
 pub mod calibration;
+pub mod convert;
 pub mod engine;
 pub mod error;
 pub mod heads;

@@ -63,6 +63,18 @@ required-features = ["testing"]
 name = "prompt_props"
 required-features = ["testing"]
 
+[[test]]
+name = "kev_conversion"
+required-features = ["testing"]
+
+[[test]]
+name = "kev_parity"
+required-features = ["testing"]
+
+[[test]]
+name = "kev_bench"
+required-features = ["testing"]
+
 [profile.release]
 lto = "fat"
 codegen-units = 1

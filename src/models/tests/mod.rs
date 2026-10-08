@@ -9,8 +9,10 @@
 
 mod harness;
 mod hub_flow;
+mod mini;
 mod pipeline;
 mod reject;
 mod robustness;
+mod source;
 
 pub(crate) use harness::Harness;

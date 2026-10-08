@@ -36,6 +36,8 @@ pub struct Harness {
     pub endpoint: Option<String>,
     pub real_transport: Option<Arc<dyn Transport>>,
     pub converter: Option<Arc<dyn crate::models::convert::Converter>>,
+    pub head_reader: Option<Arc<dyn crate::models::head::HeadReader>>,
+    pub cancel: Option<Arc<dyn crate::hub::events::Cancel>>,
 }
 
 pub const EMPTY_INDEX: &str = r#"{"default": null, "current": {}}"#;
@@ -56,6 +58,8 @@ impl Harness {
             endpoint: None,
             real_transport: None,
             converter: None,
+            head_reader: None,
+            cancel: None,
         }
     }
 
@@ -94,8 +98,8 @@ impl Harness {
                 .as_deref()
                 .unwrap_or(self.transport.as_ref()),
             observer: self.recorder.as_ref(),
-            cancel: &NeverCancel,
-            head_reader: None,
+            cancel: self.cancel.as_deref().unwrap_or(&NeverCancel),
+            head_reader: self.head_reader.as_deref(),
             converter: self.converter.as_deref(),
         };
         load_model(req, &ctx)

@@ -197,6 +197,69 @@ const QWEN2_PARAMS: &[(&str, ParamKind)] = &[
     ("tie_embeddings", ParamKind::Bool),
 ];
 
+fn qwen35_tensors(p: &ArchParams) -> Vec<TensorSpec> {
+    crate::convert::layout::Dims::from_params(p)
+        .entries()
+        .into_iter()
+        .map(|e| TensorSpec {
+            name: e.gguf,
+            dims: e.dims,
+            role: e.role,
+        })
+        .collect()
+}
+
+fn qwen35_metadata(p: &ArchParams) -> Vec<(String, MetaExpect)> {
+    let uint = |key: &str, v: u64| (key.to_string(), MetaExpect::UInt(v));
+    vec![
+        (
+            "general.architecture".to_string(),
+            MetaExpect::Str("qwen35".to_string()),
+        ),
+        uint(
+            "qwen35.block_count",
+            p.int("n_layers") + p.int("n_mtp_layers"),
+        ),
+        uint("qwen35.embedding_length", p.int("n_embd")),
+        uint("qwen35.feed_forward_length", p.int("n_ff")),
+        uint("qwen35.attention.head_count", p.int("n_heads")),
+        uint("qwen35.attention.head_count_kv", p.int("n_kv_heads")),
+        uint("qwen35.attention.key_length", p.int("head_dim")),
+        uint("qwen35.attention.value_length", p.int("head_dim")),
+        uint("qwen35.nextn_predict_layers", p.int("n_mtp_layers")),
+        uint("qwen35.ssm.conv_kernel", p.int("ssm_conv_kernel")),
+        uint("qwen35.ssm.state_size", p.int("ssm_state_size")),
+        uint("qwen35.ssm.group_count", p.int("ssm_group_count")),
+        uint("qwen35.ssm.time_step_rank", p.int("ssm_time_step_rank")),
+        uint("qwen35.ssm.inner_size", p.int("ssm_inner_size")),
+        uint(
+            "qwen35.full_attention_interval",
+            p.int("full_attention_interval"),
+        ),
+        uint("qwen35.rope.dimension_count", p.int("rope_dim")),
+    ]
+}
+
+const QWEN35_PARAMS: &[(&str, ParamKind)] = &[
+    ("n_layers", ParamKind::Int),
+    ("n_mtp_layers", ParamKind::Int),
+    ("n_embd", ParamKind::Int),
+    ("n_ff", ParamKind::Int),
+    ("n_heads", ParamKind::Int),
+    ("n_kv_heads", ParamKind::Int),
+    ("head_dim", ParamKind::Int),
+    ("n_vocab", ParamKind::Int),
+    ("tie_embeddings", ParamKind::Bool),
+    ("full_attention_interval", ParamKind::Int),
+    ("ssm_conv_kernel", ParamKind::Int),
+    ("ssm_state_size", ParamKind::Int),
+    ("ssm_group_count", ParamKind::Int),
+    ("ssm_time_step_rank", ParamKind::Int),
+    ("ssm_inner_size", ParamKind::Int),
+    ("rope_theta", ParamKind::Int),
+    ("rope_dim", ParamKind::Int),
+];
+
 #[cfg(feature = "testing")]
 fn fake_tensors(p: &ArchParams) -> Vec<TensorSpec> {
     vec![
@@ -228,20 +291,42 @@ const FAKE_PARAMS: &[(&str, ParamKind)] =
     &[("n_embd", ParamKind::Int), ("n_vocab", ParamKind::Int)];
 
 /// Families of the production table.
-static FAMILIES: &[Family] = &[Family {
-    key: "qwen2-letters",
-    arch: "qwen2",
-    head_kind: "letters",
-    template_id: "chatml-letters",
-    template_version: 1,
-    special_roles: &["im_start", "im_end"],
-    question_types: &["choice", "noul"],
-    params: QWEN2_PARAMS,
-    tensors: qwen2_tensors,
-    metadata: qwen2_metadata,
-    context_key: "qwen2.context_length",
-    n_vocab: qwen2_vocab,
-}];
+static FAMILIES: &[Family] = &[
+    Family {
+        key: "qwen2-letters",
+        arch: "qwen2",
+        head_kind: "letters",
+        template_id: "chatml-letters",
+        template_version: 1,
+        special_roles: &["im_start", "im_end"],
+        question_types: &["choice", "noul"],
+        params: QWEN2_PARAMS,
+        tensors: qwen2_tensors,
+        metadata: qwen2_metadata,
+        context_key: "qwen2.context_length",
+        n_vocab: qwen2_vocab,
+    },
+    Family {
+        key: "qwen35-pointer",
+        arch: "qwen35",
+        head_kind: "pointer",
+        template_id: "kev",
+        template_version: 1,
+        special_roles: &[
+            "fim_prefix",
+            "fim_middle",
+            "fim_suffix",
+            "box_start",
+            "box_end",
+        ],
+        question_types: &["choice", "noul", "score"],
+        params: QWEN35_PARAMS,
+        tensors: qwen35_tensors,
+        metadata: qwen35_metadata,
+        context_key: "qwen35.context_length",
+        n_vocab: qwen2_vocab,
+    },
+];
 
 /// Extra families that exist only in test builds (feature `testing`): they prove the loader
 /// is generic and let Python tests run the whole pipeline with the fake backend.

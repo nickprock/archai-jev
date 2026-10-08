@@ -13,6 +13,7 @@ pub mod incompat;
 pub mod llama_backend;
 pub mod load;
 pub mod manifest;
+pub mod materialize;
 pub mod record;
 pub mod registry;
 pub mod resolve;
