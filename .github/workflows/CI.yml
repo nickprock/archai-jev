@@ -82,12 +82,30 @@ jobs:
         if: steps.default-tokenizer.outputs.cache-hit != 'true'
         run: |
           curl -fL --retry 4 --retry-delay 5 -o default-tokenizer.json https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct/resolve/989aa7980e4cf806f80c7fef2b1adb7bc71aa306/tokenizer.json
-      - name: Check the tokenizers and expose them to the tests
+      - name: Cache the checkpoint conversion test assets (Kev head.pt, base tokenizer files)
+        id: conversion-assets
+        uses: actions/cache@v5
+        with:
+          path: |
+            kev-head.pt
+            base-tokenizer.json
+            base-tokenizer-config.json
+          key: conversion-assets-f400bd12802b2b10-fe000e3ed39ed12b-e611fbccc7c29ef3
+      - name: Download the checkpoint conversion test assets (SHA-256 checked below)
+        if: steps.conversion-assets.outputs.cache-hit != 'true'
         run: |
-          printf '%s\n' "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523  kev-tokenizer.json" "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539  default-tokenizer.json" > tokenizers.sha256
+          curl -fL --retry 4 --retry-delay 5 -o kev-head.pt https://huggingface.co/jaredpalmer/kev-0.8b/resolve/9a45d25eb2ab761841196625383fa1dff0e56c1e/head.pt
+          curl -fL --retry 4 --retry-delay 5 -o base-tokenizer.json https://huggingface.co/Qwen/Qwen3.5-0.8B-Base/resolve/dc7cdfe2ee4154fa7e30f5b51ca41bfa40174e68/tokenizer.json
+          curl -fL --retry 4 --retry-delay 5 -o base-tokenizer-config.json https://huggingface.co/Qwen/Qwen3.5-0.8B-Base/resolve/dc7cdfe2ee4154fa7e30f5b51ca41bfa40174e68/tokenizer_config.json
+      - name: Check the test assets and expose them to the tests
+        run: |
+          printf '%s\n' "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523  kev-tokenizer.json" "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539  default-tokenizer.json" "f400bd12802b2b105ae45d6b03774a158a3db4fccff42413734ddca2e5c920b6  kev-head.pt" "fe000e3ed39ed12b8d2481d527d44f93c65d37e87645d2dcc80d1bf9d50d2927  base-tokenizer.json" "e611fbccc7c29ef3b1cafb1cb7ea548d189968632901d678fd62be68c47885de  base-tokenizer-config.json" > tokenizers.sha256
           if command -v sha256sum >/dev/null; then sha256sum -c tokenizers.sha256; else shasum -a 256 -c tokenizers.sha256; fi
           echo "ARCHAI_JEV_TEST_TOKENIZER=$PWD/kev-tokenizer.json" >> "$GITHUB_ENV"
           echo "ARCHAI_JEV_TEST_DEFAULT_TOKENIZER=$PWD/default-tokenizer.json" >> "$GITHUB_ENV"
+          echo "ARCHAI_JEV_TEST_KEV_HEAD=$PWD/kev-head.pt" >> "$GITHUB_ENV"
+          echo "ARCHAI_JEV_TEST_BASE_TOKENIZER=$PWD/base-tokenizer.json" >> "$GITHUB_ENV"
+          echo "ARCHAI_JEV_TEST_BASE_TOKENIZER_CONFIG=$PWD/base-tokenizer-config.json" >> "$GITHUB_ENV"
           echo "ARCHAI_JEV_REQUIRE_ASSETS=1" >> "$GITHUB_ENV"
       - name: Rust tests
         run: cargo test --features testing
