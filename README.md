@@ -1,5 +1,11 @@
 # archai-jev
 
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/archai-jev?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/archai-jev)
+[![PyPI](https://img.shields.io/pypi/v/archai-jev)](https://pypi.org/project/archai-jev/)
+[![Python](https://img.shields.io/pypi/pyversions/archai-jev)](https://pypi.org/project/archai-jev/)
+[![License](https://img.shields.io/github/license/ArchAI-Labs/archai-jev)](https://github.com/ArchAI-Labs/archai-jev/blob/main/LICENSE)
+[![Stars](https://img.shields.io/github/stars/ArchAI-Labs/archai-jev)](https://github.com/ArchAI-Labs/archai-jev/stargazers)
+
 A runtime for **System One** decision models: you give it a *state* (text, a dict, a list) and one
 or more **typed questions** (choose one option, score on a scale, yes/no), and it returns **typed
 values with probabilities**, never free text. The expensive part (tokenization, inference,
